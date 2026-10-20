@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Chat SSE Demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 16px; }
+    #output { background: #f6f8fa; border: 1px solid #ddd; border-radius: 8px; padding: 16px; min-height: 200px; white-space: pre-wrap; }
+    input { width: 100%; padding: 10px; box-sizing: border-box; margin: 12px 0; }
+    button { padding: 8px 16px; cursor: pointer; }
+    .err { color: #d33; }
+  </style>
+</head>
+<body>
+  <h2>FastAPI + SSE 流式 Chat Demo</h2>
+  <input id="prompt" placeholder="输入问题，例如：写一首五言绝句" />
+  <button id="send">发送</button>
+  <div id="output">等待输出...</div>
+
+  <script>
+    const sendBtn = document.getElementById('send');
+    const promptEl = document.getElementById('prompt');
+    const outputEl = document.getElementById('output');
+
+    sendBtn.onclick = async () => {
+      const prompt = promptEl.value.trim();
+      if (!prompt) return;
+      outputEl.textContent = '';   // 清空
+
+      const resp = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: prompt }] }),
+      });
+
+      if (!resp.ok) {
+        const err = await resp.json();
+        outputEl.textContent = `请求失败（HTTP ${resp.status}）：${JSON.stringify(err)}`;
+        return;
+      }
+
+      // 逐段读取 SSE 流
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        // 按 \n\n 切分 SSE 帧
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+
+          // 正确解析 SSE：event: 行 和 data: 行要分开处理
+          let eventName = null;
+          let dataLine = null;
+          for (const line of frame.split('\n')) {
+            if (line.startsWith('event:')) eventName = line.slice(6).trim();
+            else if (line.startsWith('data:')) dataLine = line.slice(5).trim();
+          }
+          if (dataLine === null) continue;      // 没有 data 行就跳过
+
+          if (dataLine === '[DONE]') {          // 结束标记
+            outputEl.textContent += '\n\n—— 完成 ——';
+            break;
+          }
+
+          if (eventName === 'error') {          // 错误事件：显示出来，不能吞掉
+            try {
+              const err = JSON.parse(dataLine);
+              outputEl.textContent += '\n\n[错误] ' + (err.message || dataLine);
+            } catch {
+              outputEl.textContent += '\n\n[错误] ' + dataLine;
+            }
+            continue;
+          }
+
+          try {
+            const obj = JSON.parse(dataLine);
+            if (obj.delta) outputEl.textContent += obj.delta;  // 追加一小段
+          } catch { /* 忽略非 JSON 帧 */ }
+        }
+      }
+    };
+  </script>
+</body>
+</html>
